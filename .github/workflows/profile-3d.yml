@@ -9,110 +9,113 @@ on:
 permissions:
   contents: write
 
+env:
+  DAYS: "60"
+  BAR_SCALE: "2.0"
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout profile repository
+        uses: actions/checkout@v5
 
-      - uses: yoshi389111/github-profile-3d-contrib@latest
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          USERNAME: vanduc-sec
+      - name: Checkout 3D generator
+        uses: actions/checkout@v5
+        with:
+          repository: yoshi389111/github-profile-3d-contrib
+          ref: main
+          path: _3d_source
+          persist-credentials: false
 
-      - name: Increase 3D bar height and remove radar
+      - name: Customize 3D graph
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import xml.etree.ElementTree as ET
 
-          FACTOR = 1.8
-          folder = Path("profile-3d-contrib")
-          source = folder / "profile-green-animate.svg"
-          output = folder / "profile-green-tall.svg"
+          folder = Path("_3d_source/src")
 
-          SVG_NS = "http://www.w3.org/2000/svg"
-          NS = "{" + SVG_NS + "}"
-          ET.register_namespace("", SVG_NS)
-
-          tree = ET.parse(source)
-          root = tree.getroot()
-          changed = 0
-
-          for bar in root.iter(NS + "g"):
-              move = bar.find(NS + "animateTransform")
-
-              if move is None or move.get("type") != "translate":
-                  continue
-
-              sides = [
-                  rect for rect in bar.findall(NS + "rect")
-                  if rect.find(NS + "animate") is not None
-                  and rect.find(NS + "animate").get("attributeName") == "height"
-              ]
-
-              if len(sides) != 2:
-                  continue
-
-              values = move.get("values", "").split(";")
-              if len(values) != 2:
-                  continue
-
-              x0, y0 = map(float, values[0].replace(",", " ").split())
-              x1, y1 = map(float, values[1].replace(",", " ").split())
-
-              old_height = 3 + y0 - y1
-              new_height = 3 + (old_height - 3) * FACTOR
-              new_y = y0 + 3 - new_height
-              ratio = new_height / old_height
-
-              bar.set("transform", f"translate({x1:.3f} {new_y:.3f})")
-
-              move.set(
-                  "values",
-                  f"{x0:.3f} {y0:.3f};{x1:.3f} {new_y:.3f}"
-              )
-
-              for rect in sides:
-                  height = float(rect.get("height"))
-                  rect.set("height", f"{height * ratio:.3f}")
-
-                  anim = rect.find(NS + "animate")
-                  parts = anim.get("values").split(";")
-                  anim.set(
-                      "values",
-                      f"{parts[0]};{float(parts[-1]) * ratio:.3f}"
+          def replace_once(path, old, new):
+              text = path.read_text()
+              if text.count(old) != 1:
+                  raise RuntimeError(
+                      f"Unexpected source structure: {path}"
                   )
+              path.write_text(text.replace(old, new))
 
-              changed += 1
-
-          if changed == 0:
-              raise RuntimeError("No animated 3D bars found")
-
-          # Remove the radar chart
-          for group in list(root):
-              if group.tag != NS + "g":
-                  continue
-              radar = group.find(
-                  ".//" + NS + "polygon[@class='radar']"
-              )
-              if radar is not None:
-                  root.remove(group)
-
-          tree.write(
-              output,
-              encoding="utf-8",
-              xml_declaration=True
+          # Limit calendar to the last DAYS days
+          replace_once(
+              folder / "index.ts",
+              "const userInfo = aggregate.aggregateUserInfo(response);",
+              """const userInfo = aggregate.aggregateUserInfo(response);
+                  const days = Number(process.env.DAYS || 60);
+                  if (!Number.isInteger(days) || days < 1 || days > 365) {
+                      throw new Error('DAYS must be between 1 and 365');
+                  }
+                  userInfo.contributionCalendar =
+                      userInfo.contributionCalendar.slice(-days);
+                  userInfo.totalContributions =
+                      userInfo.contributionCalendar.reduce(
+                          (sum, day) => sum + day.contributionCount, 0
+                      );"""
           )
 
-          print(f"Updated {changed} bars")
+          # Adapt grid spacing to the selected number of days
+          replace_once(
+              folder / "create-3d-contrib.ts",
+              "const dx = width / 64;",
+              "const dx = width / (weekcount + 12);"
+          )
+
+          # Increase bar height
+          replace_once(
+              folder / "create-3d-contrib.ts",
+              "Math.log10(cal.contributionCount / 20 + 1) * 144 + 3",
+              """Math.log10(cal.contributionCount / 20 + 1)
+                  * 144 * Number(process.env.BAR_SCALE || 1.8) + 3"""
+          )
+
+          # Remove the radar chart
+          path = folder / "create-svg.ts"
+          text = path.read_text()
+          start = text.index("        // radar chart\n")
+          end = text.index("        // pie chart\n", start)
+          path.write_text(text[:start] + text[end:])
+
+          # Move language chart to the upper right
+          replace_once(
+              path,
+              "            40,\n            height - pieHeight - 70,",
+              "            width - pieWidth - 40,\n            55,"
+          )
+
+          print("3D generator customized successfully")
           PY
 
-      - name: Commit & Push
+      - name: Build and generate SVG
+        working-directory: _3d_source
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          USERNAME: vanduc-sec
+        run: |
+          npm ci
+          npm run build
+          node dist/index.js
+
+      - name: Copy custom graph
+        run: |
+          mkdir -p profile-3d-contrib
+          cp \
+            _3d_source/profile-3d-contrib/profile-green-animate.svg \
+            profile-3d-contrib/profile-green-recent.svg
+
+      - name: Commit and push
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add -A .
-          if git commit -m "Update 3D contribution graph"; then
+          git add profile-3d-contrib/profile-green-recent.svg
+          if ! git diff --cached --quiet; then
+            git commit -m "Update 3D contribution graph"
             git push
           fi
