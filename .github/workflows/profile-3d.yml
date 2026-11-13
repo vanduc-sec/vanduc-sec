@@ -20,36 +20,92 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           USERNAME: vanduc-sec
 
-      - name: Remove radar chart
+      - name: Increase 3D bar height and remove radar
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import xml.etree.ElementTree as ET
 
+          FACTOR = 1.8
           folder = Path("profile-3d-contrib")
           source = folder / "profile-green-animate.svg"
-          output = folder / "profile-green-no-radar.svg"
+          output = folder / "profile-green-tall.svg"
 
-          ns = "http://www.w3.org/2000/svg"
-          ET.register_namespace("", ns)
+          SVG_NS = "http://www.w3.org/2000/svg"
+          NS = "{" + SVG_NS + "}"
+          ET.register_namespace("", SVG_NS)
+
           tree = ET.parse(source)
           root = tree.getroot()
+          changed = 0
 
-          radar = [
-              g for g in root.findall(f"{{{ns}}}g")
-              if g.get("transform", "").replace(" ", "")
-              == "translate(980,284.5)"
-          ]
+          for bar in root.iter(NS + "g"):
+              move = bar.find(NS + "animateTransform")
 
-          if len(radar) != 1:
-              raise RuntimeError("Radar group not found")
+              if move is None or move.get("type") != "translate":
+                  continue
 
-          root.remove(radar[0])
+              sides = [
+                  rect for rect in bar.findall(NS + "rect")
+                  if rect.find(NS + "animate") is not None
+                  and rect.find(NS + "animate").get("attributeName") == "height"
+              ]
+
+              if len(sides) != 2:
+                  continue
+
+              values = move.get("values", "").split(";")
+              if len(values) != 2:
+                  continue
+
+              x0, y0 = map(float, values[0].replace(",", " ").split())
+              x1, y1 = map(float, values[1].replace(",", " ").split())
+
+              old_height = 3 + y0 - y1
+              new_height = 3 + (old_height - 3) * FACTOR
+              new_y = y0 + 3 - new_height
+              ratio = new_height / old_height
+
+              bar.set("transform", f"translate({x1:.3f} {new_y:.3f})")
+
+              move.set(
+                  "values",
+                  f"{x0:.3f} {y0:.3f};{x1:.3f} {new_y:.3f}"
+              )
+
+              for rect in sides:
+                  height = float(rect.get("height"))
+                  rect.set("height", f"{height * ratio:.3f}")
+
+                  anim = rect.find(NS + "animate")
+                  parts = anim.get("values").split(";")
+                  anim.set(
+                      "values",
+                      f"{parts[0]};{float(parts[-1]) * ratio:.3f}"
+                  )
+
+              changed += 1
+
+          if changed == 0:
+              raise RuntimeError("No animated 3D bars found")
+
+          # Remove the radar chart
+          for group in list(root):
+              if group.tag != NS + "g":
+                  continue
+              radar = group.find(
+                  ".//" + NS + "polygon[@class='radar']"
+              )
+              if radar is not None:
+                  root.remove(group)
+
           tree.write(
               output,
               encoding="utf-8",
               xml_declaration=True
           )
+
+          print(f"Updated {changed} bars")
           PY
 
       - name: Commit & Push
@@ -57,6 +113,6 @@ jobs:
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add -A .
-          if git commit -m "generated"; then
+          if git commit -m "Update 3D contribution graph"; then
             git push
           fi
