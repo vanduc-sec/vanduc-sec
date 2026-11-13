@@ -93,6 +93,7 @@ jobs:
           print("3D generator customized successfully")
           PY
 
+     
       - name: Build and generate SVG
         working-directory: _3d_source
         env:
@@ -100,8 +101,7 @@ jobs:
           USERNAME: vanduc-sec
         run: |
           npm ci
-          npm run build
-          node dist/index.js
+          npx ts-node src/index.ts
 
       - name: Copy custom graph
         run: |
