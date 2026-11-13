@@ -11,7 +11,7 @@ permissions:
 
 env:
   DAYS: "60"
-  BAR_SCALE: "2.5"
+  BAR_SCALE: "10.0"
 
 jobs:
   build:
